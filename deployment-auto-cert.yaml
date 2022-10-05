@@ -1,0 +1,90 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admission-registry-sa
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: admission-registry-role
+rules:
+  - verbs: ["*"]
+    resources: ["validatingwebhookconfigurations","mutatingwebhookconfiguration"]
+    apiGroups: ["admissionregistration.k8s.io"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admission-registry-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: admission-registry-role
+subjects:
+  - kind: ServiceAccount
+    name: admission-registry-sa  # 注意要与上面SA对应
+    namespace: default
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admission-webhook-example-deployment
+  labels:
+    app: admission-webhook-example
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: admission-webhook-example
+  template:
+    metadata:
+      labels:
+        app: admission-webhook-example
+    spec:
+      # 对资源的访问和操作都需要 sa，授权,用于创建 ValidatingWebhookConfiguration 和  MutatingWebhookConfiguration 资源
+      serviceAccount: admission-registry-sa  # 注意要与上面SA对应
+      # 配置证书
+      initContainers:
+        - name: webhook-init
+          image: dfy007/admission-registry-tls:v1.6
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: WEBHOOK_NAMESPACE
+              value: default
+            # 提供检查服务的 webhook 服务
+            - name: WEBHOOK_SERVICE
+              value: admission-registry
+            # ValidatingWebhookConfiguration 资源 name，定义监控哪些资源，发送给上面 webhook 服务验证
+            # 此处监控的资源写死在代码中，目前是 pod，后续也可以改为 环境变量传入等方式
+            - name: VALIDATE_CONFIG
+              value: admission-registry-validate
+            # MutatingWebhookConfiguration 资源 name，定义监控哪些资源，发送给上面 webhook 服务验证
+            # 此处监控的资源写死在代码中，目前是 deployment 和 service，后续也可以改为 环境变量传入等方式
+            - name: MUTATE_CONFIG
+              value: admission-registry-mutate
+            # 定义 webhook 服务中提供 validate 处理功能的路径，这个是在 server 端定义好的，需要保持一致
+            - name: VALIDATE_PATH
+              value: /validate
+            # 定义 webhook 服务中提供 mutate 处理功能的路径，这个是在 server 端定义好的，需要保持一致
+            - name: MUTATE_PATH
+              value: /mutate
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /etc/webhook/certs
+      # webhook 服务端
+      containers:
+        - name: admission-webhook-example
+          image: dfy007/admission-webhook-example:v1.6
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: WHITELIST_REGISTRIES
+              value: docker.io,gcr.io
+          ports:
+            - containerPort: 443
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /etc/webhook/certs
+              readOnly: true
+      volumes:
+        - name: webhook-certs
+          emptyDir: {}
